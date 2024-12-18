@@ -1,0 +1,5 @@
+MUL.D F3, F1, F2;
+L.D F3, 15;
+S.D F3, 12;
+DIV.D F3,F3,F3;
+S.D F3, 12;

@@ -1,0 +1,503 @@
+//-----------------------------------------------------------------------------------//
+  //Standard inclues
+    #include <stdio.h>
+    #include <time.h>
+  //Kernel includes
+    #include <Arduino_FreeRTOS.h>
+    #include <task.h>
+    #include <timers.h>
+  //Functional includes
+    #include <AFMotor.h>
+    #include <Wire.h>
+    #include <SoftwareSerial.h>
+    #include <TEA5767.h>
+//-----------------------------------------------------------------------------------//
+  //Bluetooth 
+    #define BTTX 53
+    #define BTRX 52
+    SoftwareSerial SerialBT(BTTX, BTRX); 
+    long lmillis = 0;
+  //Radio
+    TEA5767 radio = TEA5767();
+  //Joystick
+    #define VRX_PIN  A14
+    #define VRY_PIN  A15 
+
+    #define LEFT_THRESHOLD  400
+    #define RIGHT_THRESHOLD 800
+    #define UP_THRESHOLD    400
+    #define DOWN_THRESHOLD  800
+
+    #define COMMAND_NO     0x00
+    #define COMMAND_LEFT   0x01
+    #define COMMAND_RIGHT  0x02
+    #define COMMAND_UP     0x04
+    #define COMMAND_DOWN   0x08
+
+    int xValue = 0 ; 
+    int yValue = 0 ; 
+
+    int command = COMMAND_NO;
+    char gearValue = "p";
+  //Seven Segment Display
+    #define A 26
+    #define B 27
+    #define C 29
+    #define D 23
+    #define E 22
+    #define F 25
+    #define G 24
+    #define DP 28
+    #define common_cathode 0
+    #define common_anode 1
+
+    bool segMode = common_cathode; 
+    int seg[] {A,B,C,D,E,F,G,DP};
+    byte chars = 35; 
+
+    byte Chars[35][9] 
+    { 
+      {'0',1,1,1,1,1,1,0,0},//0
+      {'1',0,1,1,0,0,0,0,0},//1
+      {'2',1,1,0,1,1,0,1,0},//2
+      {'3',1,1,1,1,0,0,1,0},//3
+      {'4',0,1,1,0,0,1,1,0},//4
+      {'5',1,0,1,1,0,1,1,0},//5
+      {'6',1,0,1,1,1,1,1,0},//6
+      {'7',1,1,1,0,0,0,0,0},//7
+      {'8',1,1,1,1,1,1,1,0},//8
+      {'9',1,1,1,1,0,1,1,0},//9
+      {'a',1,1,1,0,1,1,1,0},//A/10
+      {'b',0,0,1,1,1,1,1,0},//b/11
+      {'c',1,0,0,1,1,1,0,0},//C/12
+      {'d',0,1,1,1,1,0,1,0},//d/13
+      {'e',1,0,0,1,1,1,1,0},//E/14
+      {'f',1,0,0,0,1,1,1,0},//F/15
+      {'g',1,0,1,1,1,1,0,0},//G/16
+      {'h',0,1,1,0,1,1,1,0},//H/17
+      {'i',0,0,0,0,1,1,0,0},//I/18
+      {'j',0,1,1,1,1,0,0,0},//J/19
+      {'l',0,0,0,1,1,1,0,0},//L/20
+      {'n',0,0,1,0,1,0,1,0},//n/21
+      {'o',0,0,1,1,1,0,1,0},//o/22
+      {'p',1,1,0,0,1,1,1,0},//P/23
+      {'q',1,1,1,0,0,1,1,0},//q/24
+      {'r',0,0,0,0,1,0,1,0},//r/25
+      {'s',1,0,1,1,0,1,1,0},//S/26   looks like number 5
+      {'t',0,0,0,1,1,1,1,0},//t/27
+      {'u',0,1,1,1,1,1,0,0},//U/28
+      {'y',0,1,1,1,0,1,1,0},//y/29
+      {'-',0,0,0,0,0,0,1,0},//-/30
+      {'.',0,0,0,0,0,0,0,1},//./31
+      {']',1,1,1,1,0,0,0,0},//]/32
+      {'[',1,0,0,1,1,1,0,0},//[/33
+      {'_',0,0,0,1,0,0,0,0},//_/34
+    };
+
+
+  //Motors
+    int left_line_sensor= 18;
+    int right_line_sensor= 19;
+    int state = 3; // 1 to turn right, 2 to turn left & 3 to go forward
+    int reading_left;
+    int reading_right;
+    AF_DCMotor frontRight(1); 
+    AF_DCMotor frontLeft(2);
+    AF_DCMotor backLeft(3);
+    AF_DCMotor backRight(4);
+
+
+  //Leds
+    int leds_pin = 44;
+    int ledValue;
+
+  //Light Sensor
+    #define Light_sensor_pin A8
+    int light_sensor_min;
+    int light_sensor_max;
+    int light_sensorValue;
+//-----------------------------------------------------------------------------------//
+  //Tasks
+    void joystickTask(void *pvParameters);
+    void radioTask(void *pvParameters);
+    void driveTask(void *pvParameters);
+    void lightTask(void *pvParameters);
+
+  //Drive task handler
+    TaskHandle_t xDriveHandle;
+//-----------------------------------------------------------------------------------//
+  void setup()
+  {
+    Serial.begin(9600);
+    //Line sensors
+      pinMode(left_line_sensor,INPUT);
+      pinMode(right_line_sensor,INPUT);
+
+    //Leds and Light sensor
+      pinMode(leds_pin,OUTPUT);
+      light_sensor_min=analogRead(Light_sensor_pin);
+      light_sensor_max=analogRead(Light_sensor_pin);
+      while (millis() < 5000) 
+      {
+        light_sensorValue = analogRead(Light_sensor_pin);
+        if (light_sensorValue > light_sensor_max)
+          light_sensor_max = light_sensorValue;
+        if (light_sensorValue < light_sensor_min)
+          light_sensor_min = light_sensorValue;
+      }
+
+     //Bluetooth
+      SerialBT.begin(9600);  //Baud Rate for AT-command Mode.
+      SerialBT.println(radio.getFrequency());
+    //Radio
+      radio.init(4);
+
+    //Seven Segment
+      pinMode(seg[0],OUTPUT);
+      pinMode(seg[1],OUTPUT);
+      pinMode(seg[2],OUTPUT);
+      pinMode(seg[3],OUTPUT);
+      pinMode(seg[4],OUTPUT);
+      pinMode(seg[5],OUTPUT);
+      pinMode(seg[6],OUTPUT);
+      pinMode(seg[7],OUTPUT);
+
+    //Tasks
+      xTaskCreate(joystickTask, "Joystick Task", 1000,NULL, 2, NULL);
+      xTaskCreate(radioTask, "Radio Task", 1000,NULL, 2, NULL);
+      xTaskCreate(lightTask, "Leds & Light sensor task", 1000,NULL, 2, NULL);
+      xTaskCreate(driveTask, "DrivingTask", 100,NULL,3, &xDriveHandle);
+
+    //Interrupts
+      // attachInterrupt(digitalPinToInterrupt(left_line_sensor),handleLeftLineSensor,CHANGE);
+      // attachInterrupt(digitalPinToInterrupt(right_line_sensor),handleRightLineSensor,CHANGE);
+      Serial.println("Setup done");
+    
+  }
+
+  void loop()
+  {
+
+  }
+
+//-----------------------------------------------------------------------------------//
+  //Interrupt handlers
+    void handleLeftLineSensor()
+    {
+      vTaskPrioritySet(xDriveHandle,3);
+      Serial.println("Priority updated");
+    }
+
+    void handleRightLineSensor()
+    {
+      //wake drive task up
+      vTaskPrioritySet(xDriveHandle,3);
+      Serial.println("Priority updated");
+    }
+//-----------------------------------------------------------------------------------//
+  //Tasks
+    void driveTask(void *pvParameters)
+    {
+      TickType_t xLastWakeTime;
+      const TickType_t xDelay50ms = pdMS_TO_TICKS(50);
+      const TickType_t xDelay100ms = pdMS_TO_TICKS(100);
+      xLastWakeTime= xTaskGetTickCount();
+      while(1)
+      {
+        reading_left = digitalRead(left_line_sensor);
+        reading_right = digitalRead(right_line_sensor);
+        if(reading_left&&!reading_right)
+        {
+          Serial.println("Right");
+          stop();
+          vTaskDelay(xDelay50ms);
+
+          goBack();
+          vTaskDelay(xDelay50ms);
+
+          goRight();
+          vTaskDelay(xDelay100ms);
+        }
+        else
+        {
+          if(reading_right&&!reading_left)
+          {
+            Serial.println("Left");
+            stop();
+            vTaskDelay(xDelay50ms);
+
+            goBack();
+            vTaskDelay(xDelay50ms);
+
+            goLeft();
+            vTaskDelay(xDelay100ms);
+          }
+          else
+          {
+            Serial.println("forward");
+            goForward();
+            vTaskDelay(xDelay100ms);
+            //vTaskPrioritySet(NULL, 1);
+          }
+        }
+      } 
+    }
+
+    void radioTask(void *pvParameters)
+    {
+      TickType_t xLastWakeTime;
+      const TickType_t xDelay1000ms = pdMS_TO_TICKS(100);
+      xLastWakeTime= xTaskGetTickCount();
+      while(1)
+      {
+       //Serial.println("Radio task");
+       if (SerialBT.available())
+        {
+          int flag = SerialBT.read(); // previous 49 next 48 on 50 off 51
+          if(flag == 48)
+          {
+            radio.nextStation();
+          }
+          else
+          {
+            if(flag ==49)
+            {
+              radio.previousStation();
+            }
+            else
+            {
+              if(flag == 51)
+              {
+                radio.setMuted(true);
+                SerialBT.println('OFF');
+              }
+              else
+              {
+                if(flag == 50)
+                {
+                  radio.setMuted(false);
+                }
+              }
+            }
+            if(flag!=51)
+              SerialBT.println(radio.getFrequency());
+          }
+          vTaskDelayUntil( &xLastWakeTime, xDelay1000ms);
+        }
+
+      }
+    }
+
+
+    void joystickTask(void *pvParameters)
+    {
+      TickType_t xLastWakeTime;
+      const TickType_t xDelay1000ms = pdMS_TO_TICKS(100);
+      xLastWakeTime= xTaskGetTickCount();
+      while(1)
+      {
+        //Serial.println("joy stick");
+        xValue = analogRead(VRX_PIN);
+        yValue = analogRead(VRY_PIN);
+        command = COMMAND_NO;
+        if (xValue < LEFT_THRESHOLD)
+        {
+          command = command | COMMAND_LEFT;
+        }
+        else
+        {
+          if (xValue > RIGHT_THRESHOLD)
+          {
+            command = command | COMMAND_RIGHT;
+          }
+          else
+          {
+            if (yValue < UP_THRESHOLD)
+            {
+              command = command | COMMAND_UP;
+            }
+            else
+            {
+              if (yValue > DOWN_THRESHOLD)
+              {
+                command = command | COMMAND_DOWN;
+              }
+            } 
+          }
+                
+        }
+        if (command & COMMAND_LEFT) 
+        {
+          gearValue = 'p';
+        }
+        else 
+        {
+          if (command & COMMAND_RIGHT) 
+          {
+            gearValue = 'd';
+          }
+          else 
+          {
+            if (command & COMMAND_UP) 
+            {
+              gearValue = 'n';
+            }
+            else 
+            { 
+              if (command & COMMAND_DOWN)
+              {
+                gearValue = 'r';
+              }
+            }
+          }
+        }
+        Print(gearValue);
+        vTaskDelayUntil( &xLastWakeTime, xDelay1000ms);
+      }
+    }
+    void lightTask(void *pvParameters)
+    {
+      TickType_t xLastWakeTime;
+      const TickType_t xDelay1000ms = pdMS_TO_TICKS(100);
+      xLastWakeTime= xTaskGetTickCount();
+      while(1)
+      {
+        //Serial.println("Light");
+        light_sensorValue = analogRead(Light_sensor_pin);
+        ledValue = map(light_sensorValue, light_sensor_min, light_sensor_max, 0, 255);
+        analogWrite(leds_pin,(255-ledValue));
+        vTaskDelayUntil( &xLastWakeTime, xDelay1000ms);
+      }
+    }
+//-----------------------------------------------------------------------------------//
+  //Helpers
+    //Seven segment helper functions
+      void setState(bool mode) //sets the hole segment state to "mode"
+      { 
+        for(int i = 0;i<=6;i++)
+        {
+          digitalWrite(seg[i],mode);
+        }
+      }
+      void Print(char Char) // print any character on the segment ( Note : you can't use capital characters )
+      { 
+        int charNum = -1;// set search resault to -1
+        setState(segMode);//turn off the segment
+        
+        for(int i = 0; i < chars ;i++)
+        { //search for the entered character
+          if(Char == Chars[i][0]) //if the character found
+          {
+            charNum = i;//set the result number into charNum ( because this function prints the character using it's number in the array )
+          }
+        }
+      
+        if(charNum == -1 )// if the character not found
+        {
+          for(int i = 0;i <= 6;i++)
+          {
+            digitalWrite(seg[i],HIGH);
+            //delay(100);
+            digitalWrite(seg[i],LOW);
+          }
+          for(int i = 0;i <= 2;i++)
+          {
+            //delay(100);
+            setState(HIGH);
+            //delay(100);
+            setState(LOW); 
+          }
+        }
+        else // else if the character is found print it
+        {
+          for(int i = 0;i<8;i++)
+          {
+            digitalWrite(seg[i],Chars[charNum][i+1]);
+          }
+        }
+      }
+    //Driving helper functions
+      void goForward()
+      {
+        frontRight.run(BACKWARD);
+        frontRight.setSpeed(50);
+
+        frontLeft.run(BACKWARD);
+        frontLeft.setSpeed(50);
+        
+        backRight.run(BACKWARD);
+        backRight.setSpeed(75);
+
+        backLeft.run(BACKWARD);
+        backLeft.setSpeed(75);
+      }
+      void goBack()
+      {
+        frontRight.run(FORWARD);
+        frontRight.setSpeed(50);
+
+        frontLeft.run(FORWARD);
+        frontLeft.setSpeed(50);
+        
+        backRight.run(FORWARD);
+        backRight.setSpeed(75);
+
+        backLeft.run(FORWARD);
+        backLeft.setSpeed(75);
+      }
+      void goRight()
+      {
+        frontRight.run(RELEASE);
+        backRight.run(RELEASE);
+
+        frontLeft.run(BACKWARD);
+        frontLeft.setSpeed(150);
+
+        backLeft.run(BACKWARD);
+        backLeft.setSpeed(150);
+      }
+      void goLeft()
+      {
+        frontLeft.run(RELEASE);
+        backLeft.run(RELEASE);
+
+        frontRight.run(BACKWARD);
+        frontRight.setSpeed(150);
+
+        backRight.run(BACKWARD);
+        backRight.setSpeed(150);
+      }
+      void stop()
+      {
+        frontLeft.run(RELEASE);
+        backLeft.run(RELEASE);
+
+        frontRight.run(RELEASE);
+        backRight.run(RELEASE);
+      }
+    //Radio helper functions
+      void printFrequency()
+      {
+        float frequency = radio.getFrequency(); //Get Frequency
+        Serial.print("New Frequency: ");
+        Serial.println(frequency, 2);
+        short lvl = radio.getSignalLevel();
+        Serial.print("Signal Lvl ");
+        Serial.println(lvl);
+      }
+//-----------------------------------------------------------------------------------//
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
